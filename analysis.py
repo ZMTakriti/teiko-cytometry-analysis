@@ -7,6 +7,9 @@ Functions:
   get_stats_data()        -> Part 3: filtered data for responder comparison
   run_statistical_tests() -> Part 3: Mann-Whitney U per population
   get_boxplot_figure()    -> Part 3: matplotlib figure of boxplots
+  get_longitudinal_data()           -> Part 3: all timepoints for trajectory analysis
+  run_mixed_effects_models()        -> Part 3: LMM per population (time x response interaction)
+  run_mixed_effects_models_clr()    -> Part 3: same LMM on CLR-transformed frequencies (sensitivity)
   get_baseline_samples()  -> Part 4: melanoma PBMC baseline miraclib samples
   get_samples_per_project()     -> Part 4: count per project
   get_responder_counts()        -> Part 4: responder/non-responder counts
@@ -15,10 +18,12 @@ Functions:
 """
 
 import sqlite3
+import numpy as np
 import pandas as pd
 from scipy import stats
 from scipy.stats import mannwhitneyu
 from statsmodels.stats.multitest import multipletests
+import statsmodels.formula.api as smf
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -283,6 +288,153 @@ def _append_test_rows(results: list, df: pd.DataFrame, label: str) -> None:
         row["p_by_fdr"]    = round(p_by, 6)
         row["sig_by_fdr"]  = p_by < 0.05
         results.append(row)
+
+
+def get_longitudinal_data() -> pd.DataFrame:
+    """
+    Returns all three timepoints combined for the filtered cohort
+    (melanoma + miraclib + PBMC + response in yes/no).
+    One row per (subject, timepoint) with raw counts and pct columns.
+    """
+    conn = _get_conn()
+    df = pd.read_sql_query("""
+        SELECT sub.subject_id, s.response, s.time_from_treatment_start,
+               s.b_cell, s.cd8_t_cell, s.cd4_t_cell, s.nk_cell, s.monocyte
+        FROM samples s
+        JOIN subjects sub ON s.subject_id = sub.subject_id
+        WHERE sub.condition = 'melanoma'
+          AND s.treatment   = 'miraclib'
+          AND s.sample_type = 'PBMC'
+          AND s.response IN ('yes', 'no')
+        ORDER BY sub.subject_id, s.time_from_treatment_start
+    """, conn)
+    conn.close()
+
+    df["total_count"] = df[CELL_POPULATIONS].sum(axis=1)
+    for pop in CELL_POPULATIONS:
+        df[f"{pop}_pct"] = df[pop] / df["total_count"] * 100
+
+    return df
+
+
+def run_mixed_effects_models(long_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fits a linear mixed effects model per cell population:
+
+      pct ~ time_from_treatment_start * C(response) + (1 | subject_id)
+
+    The time × response interaction term tests whether trajectories diverge
+    between responders and non-responders, accounting for repeated measures.
+
+    Convergence warnings are suppressed — with only 3 timepoints per subject,
+    the random-effects variance often hits the boundary (near zero), which is
+    expected and does not invalidate the fixed-effects estimates.
+
+    Returns a DataFrame with columns:
+      population, p_time, p_response, p_interaction, p_interaction_by_fdr, sig_interaction_by_fdr
+
+    BY FDR correction is applied across the 5 interaction p-values to account for
+    simultaneous testing across populations, consistent with the Mann-Whitney analysis.
+    """
+    import warnings
+
+    rows = []
+    for pop in CELL_POPULATIONS:
+        col = f"{pop}_pct"
+        df_m = long_df[["subject_id", "response", "time_from_treatment_start", col]].dropna()
+
+        model = smf.mixedlm(
+            f"Q('{col}') ~ time_from_treatment_start * C(response)",
+            df_m,
+            groups=df_m["subject_id"],
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = model.fit(reml=True, disp=False)
+
+        # Reference level is "no" (alphabetically first); "yes" gets [T.yes]
+        interaction_key = "time_from_treatment_start:C(response)[T.yes]"
+        rows.append({
+            "population":       pop,
+            "p_time":           result.pvalues.get("time_from_treatment_start", float("nan")),
+            "p_response":       result.pvalues.get("C(response)[T.yes]", float("nan")),
+            "p_interaction":    result.pvalues.get(interaction_key, float("nan")),
+        })
+
+    result_df = pd.DataFrame(rows)
+
+    # BY FDR correction across the 5 simultaneous interaction tests.
+    # Applied to full-precision p-values; rounding happens only at display time.
+    _, pvals_by, _, _ = multipletests(
+        result_df["p_interaction"].tolist(), alpha=0.05, method="fdr_by"
+    )
+    result_df["p_interaction_by_fdr"] = pvals_by
+    result_df["sig_interaction_by_fdr"] = pvals_by < 0.05
+
+    # Round for display after all corrections are computed
+    for col in ["p_time", "p_response", "p_interaction", "p_interaction_by_fdr"]:
+        result_df[col] = result_df[col].round(4)
+
+    return result_df
+
+
+def run_mixed_effects_models_clr(long_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sensitivity analysis: same LMM as run_mixed_effects_models but on
+    centered log-ratio (CLR) transformed frequencies instead of raw percentages.
+
+    CLR(x_i) = log(x_i) - mean(log(x_j)) across all j populations, per sample.
+
+    CLR removes the constant-sum constraint of compositional data, giving an
+    unconstrained outcome that better satisfies linear model assumptions.
+
+    No zeros exist in this dataset so no pseudocount is needed.
+
+    Returns same column format as run_mixed_effects_models.
+    """
+    import warnings
+
+    df = long_df.copy()
+    raw = df[CELL_POPULATIONS].values.astype(float)
+    log_raw = np.log(raw)
+    clr_vals = log_raw - log_raw.mean(axis=1, keepdims=True)
+    for i, pop in enumerate(CELL_POPULATIONS):
+        df[f"{pop}_clr"] = clr_vals[:, i]
+
+    rows = []
+    for pop in CELL_POPULATIONS:
+        col = f"{pop}_clr"
+        df_m = df[["subject_id", "response", "time_from_treatment_start", col]].dropna()
+
+        model = smf.mixedlm(
+            f"Q('{col}') ~ time_from_treatment_start * C(response)",
+            df_m,
+            groups=df_m["subject_id"],
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = model.fit(reml=True, disp=False)
+
+        interaction_key = "time_from_treatment_start:C(response)[T.yes]"
+        rows.append({
+            "population":    pop,
+            "p_time":        result.pvalues.get("time_from_treatment_start", float("nan")),
+            "p_response":    result.pvalues.get("C(response)[T.yes]", float("nan")),
+            "p_interaction": result.pvalues.get(interaction_key, float("nan")),
+        })
+
+    result_df = pd.DataFrame(rows)
+
+    _, pvals_by, _, _ = multipletests(
+        result_df["p_interaction"].tolist(), alpha=0.05, method="fdr_by"
+    )
+    result_df["p_interaction_by_fdr"] = pvals_by
+    result_df["sig_interaction_by_fdr"] = pvals_by < 0.05
+
+    for col in ["p_time", "p_response", "p_interaction", "p_interaction_by_fdr"]:
+        result_df[col] = result_df[col].round(4)
+
+    return result_df
 
 
 def get_boxplot_figure(stats_df: pd.DataFrame, test_results: pd.DataFrame) -> plt.Figure:

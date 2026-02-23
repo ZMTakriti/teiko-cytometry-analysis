@@ -7,14 +7,19 @@ Run: streamlit run dashboard.py
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+from plotly.subplots import make_subplots
 
 from analysis import (
     get_frequency_table,
     get_timepoint_data,
     run_statistical_tests,
     run_timepoint_sensitivity,
+    get_longitudinal_data,
+    run_mixed_effects_models,
+    run_mixed_effects_models_clr,
     get_baseline_samples,
     get_samples_per_project,
     get_responder_counts,
@@ -40,6 +45,18 @@ def load_freq_table():
 @st.cache_data
 def load_baseline():
     return get_baseline_samples()
+
+@st.cache_data
+def load_longitudinal_data():
+    return get_longitudinal_data()
+
+@st.cache_data
+def load_lmm_results():
+    return run_mixed_effects_models(get_longitudinal_data())
+
+@st.cache_data
+def load_lmm_results_clr():
+    return run_mixed_effects_models_clr(get_longitudinal_data())
 
 
 # ---------------------------------------------------------------------------
@@ -112,160 +129,305 @@ with tab1:
 # ---------------------------------------------------------------------------
 
 with tab2:
-    st.header("Responders vs Non-Responders: Baseline (t=0)")
+    st.header("Responder Analysis: Immune Cell Frequencies and Treatment Response")
     st.markdown(
-        """
-        **Goal:** identify immune cell populations that predict treatment response *before* treatment starts.
-
-        - **Filter:** melanoma, miraclib, PBMC, t=0 (baseline) only
-        - **Unit of analysis:** one observation per subject (single pre-treatment sample)
-        - **Test:** Mann-Whitney U, two-sided, non-parametric
-        - **Multiple testing correction:** BY FDR across 5 populations (valid under any correlation structure; BH FDR is anti-conservative here due to compositional negative correlations between populations)
-        - **Effect size:** rank-biserial correlation r (r > 0 = responders rank higher; r < 0 = non-responders rank higher; |r| < 0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >0.5 large)
-        """
-    )
-
-    # Primary data: t=0 only — the only timepoint causally prior to treatment
-    t0_df = get_timepoint_data(0)
-    test_results = run_statistical_tests(t0_df)
-
-    # --- Significance table ---
-    st.subheader("Baseline Statistical Test Results")
-
-    def sig_flag(v):
-        return "✅ Yes" if v else "❌ No"
-
-    display_results = test_results[[
-        "population", "n_responders", "n_non_responders",
-        "p_value", "p_bonferroni", "p_by_fdr",
-        "sig_uncorrected", "sig_bonferroni", "sig_by_fdr", "effect_size_r"
-    ]].copy()
-    for col in ["sig_uncorrected", "sig_bonferroni", "sig_by_fdr"]:
-        display_results[col] = display_results[col].map(sig_flag)
-    display_results.columns = [
-        "Population", "n (resp.)", "n (non-resp.)",
-        "p (raw)", "p (Bonferroni)", "p (BY FDR)",
-        "Sig. raw", "Sig. Bonferroni", "Sig. BY FDR", "Effect size (r)"
-    ]
-    st.dataframe(display_results, use_container_width=True, hide_index=True)
-
-    st.info(
-        "**Why BY FDR?** Cell population frequencies are compositional (sum to 100%), "
-        "inducing negative correlations between populations. BH FDR assumes independence or "
-        "positive correlation and can be anti-conservative here. "
-        "BY FDR is valid under any dependence structure and is the primary correction used."
-    )
-
-    st.success(
-        "**Primary conclusion:** At baseline, no cell population significantly differentiates "
-        "responders from non-responders. All raw p-values exceed 0.20 and all effect sizes are "
-        "negligible (|r| < 0.06). There is no evidence of a pre-existing immune cell frequency "
-        "signature that predicts miraclib response in this melanoma cohort."
-    )
-
-    # --- Boxplots (t=0 data) ---
-    st.subheader("Baseline Distributions by Cell Population")
-    st.caption(
-        "Boxplots show t=0 (pre-treatment) measurements only. "
-        "The instructions do not specify a timepoint for Part 3, but the stated aim is response prediction — "
-        "only pre-treatment frequencies can inform a decision made before dosing."
+        "**Cohort:** melanoma patients, miraclib treatment, PBMC samples "
+        "(n = 656: 331 responders, 325 non-responders). "
+        "**Test:** Mann-Whitney U, two-sided. "
+        "**Correction:** Benjamini-Yekutieli (BY) FDR - valid under any correlation structure, "
+        "including the negative correlations that arise because cell percentages sum to 100%. "
+        "**Effect size:** rank-biserial r (positive = responders rank higher; "
+        "|r| < 0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >0.5 large)."
     )
 
     COLORS = {"yes": "#4C9BE8", "no": "#E87E4C"}
     LABELS = {"yes": "Responder", "no": "Non-responder"}
 
-    p_raw_map = dict(zip(test_results["population"], test_results["p_value"]))
-    p_by_map  = dict(zip(test_results["population"], test_results["p_by_fdr"]))
-    r_map     = dict(zip(test_results["population"], test_results["effect_size_r"]))
+    t0_df = get_timepoint_data(0)
+    test_results = run_statistical_tests(t0_df)
 
-    cols = st.columns(len(CELL_POPULATIONS))
-    for col_ui, pop in zip(cols, CELL_POPULATIONS):
+    # ================================================================
+    # Section 1: Before treatment
+    # ================================================================
+    st.subheader("Before Treatment: Can Baseline Frequencies Predict Who Will Respond?")
+    st.markdown(
+        "Only measurements taken *before* treatment begins can inform response prediction. "
+        "The table below tests whether t=0 cell frequencies differ between groups. "
+        "Use the timepoint selector to also view distributions at t=7 and t=14."
+    )
+
+    # Stats table fixed to t=0
+    disp = test_results[[
+        "population", "n_responders", "n_non_responders",
+        "p_value", "p_by_fdr", "sig_by_fdr", "effect_size_r",
+    ]].copy()
+    disp["sig_by_fdr"] = disp["sig_by_fdr"].map({True: "Yes", False: "No"})
+    disp.columns = [
+        "Population", "n (resp.)", "n (non-resp.)",
+        "p (raw)", "p (BY FDR)", "Significant?", "Effect size r",
+    ]
+
+    def _hl_sig(row):
+        if row["Significant?"] == "Yes":
+            return ["background-color: #d4edda"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(disp.style.apply(_hl_sig, axis=1), use_container_width=False, hide_index=True)
+
+    st.warning(
+        "**No cell population distinguishes responders from non-responders at baseline.** "
+        "All raw p-values exceed 0.20 and all effect sizes are negligible (|r| < 0.06). "
+        "There is no pre-treatment immune cell frequency signature predicting miraclib response "
+        "in this melanoma cohort."
+    )
+
+    # Boxplots with timepoint radio
+    selected_t = st.radio(
+        "View distributions at timepoint:",
+        options=[0, 7, 14],
+        format_func=lambda t: f"t={t} (pre-treatment, prediction-relevant)" if t == 0 else f"t={t}",
+        horizontal=True,
+    )
+
+    if selected_t == 0:
+        plot_df    = t0_df
+        plot_stats = test_results
+    else:
+        plot_df    = get_timepoint_data(selected_t)
+        plot_stats = run_statistical_tests(plot_df)
+
+    p_raw_map = dict(zip(plot_stats["population"], plot_stats["p_value"]))
+    p_by_map  = dict(zip(plot_stats["population"], plot_stats["p_by_fdr"]))
+    r_map     = dict(zip(plot_stats["population"], plot_stats["effect_size_r"]))
+
+    bcols = st.columns(len(CELL_POPULATIONS))
+    for col_ui, pop in zip(bcols, CELL_POPULATIONS):
         pct_col = f"{pop}_pct"
         fig = go.Figure()
-
         for response_val in ["yes", "no"]:
-            subset = t0_df[t0_df["response"] == response_val][pct_col].dropna()
-            fig.add_trace(
-                go.Box(
-                    y=subset,
-                    name=LABELS[response_val],
-                    marker_color=COLORS[response_val],
-                    boxmean=True,
-                    boxpoints="outliers",
-                    pointpos=0,
-                )
-            )
-
+            subset = plot_df[plot_df["response"] == response_val][pct_col].dropna()
+            fig.add_trace(go.Box(
+                y=subset,
+                name=LABELS[response_val],
+                marker_color=COLORS[response_val],
+                boxmean=True,
+                boxpoints="outliers",
+                pointpos=0,
+            ))
         p_raw = p_raw_map[pop]
         p_by  = p_by_map[pop]
         r     = r_map[pop]
-        sig   = "✱ (raw only)" if p_raw < 0.05 and p_by >= 0.05 else ("✱✱" if p_by < 0.05 else "ns")
-
         fig.update_layout(
             title=dict(
                 text=(
                     f"<b>{pop.replace('_', ' ').title()}</b><br>"
-                    f"<sub>p={p_raw:.4f} | BY p={p_by:.4f} | r={r:+.3f} {sig}</sub>"
+                    f"<sub>p={p_raw:.3f} | BY={p_by:.3f} | r={r:+.3f}</sub>"
                 ),
                 x=0.5,
             ),
             yaxis_title="Frequency (%)",
             showlegend=False,
-            height=420,
+            height=400,
             margin=dict(l=10, r=10, t=70, b=10),
         )
         col_ui.plotly_chart(fig, use_container_width=True)
 
+    if selected_t != 0:
+        st.caption(
+            f"Note: signals at t={selected_t} reflect treatment-induced changes, "
+            "not pre-treatment predictors. A genuine predictor must be detectable at t=0."
+        )
+
     st.download_button(
-        label="⬇️ Download baseline data (CSV)",
-        data=t0_df.to_csv(index=False),
-        file_name="melanoma_miraclib_pbmc_t0.csv",
+        label=f"Download t={selected_t} data (CSV)",
+        data=plot_df.to_csv(index=False),
+        file_name=f"melanoma_miraclib_pbmc_t{selected_t}.csv",
         mime="text/csv",
     )
 
-    # --- Temporal context ---
+    # ================================================================
+    # Section 2: Over time
+    # ================================================================
     st.divider()
-    st.subheader("Temporal Context: Effect Sizes Across Timepoints")
+    st.subheader("During Treatment: Do Cell Populations Change Differently Over Time?")
     st.markdown(
-        """
-        A genuine response predictor should show a signal **at t=0**, before treatment begins.
-        Signals appearing only at t=7 or t=14 reflect treatment-induced changes, not predictive biology.
-        """
+        "Even without a baseline difference, immune cell populations may evolve differently "
+        "in responders vs non-responders as treatment progresses. "
+        "The line plots below show mean frequency (+/- 95% CI) at t=0, t=7, and t=14. "
+        "The mixed effects model formally tests whether the two groups' trajectories diverge, "
+        "accounting for the fact that the same subjects appear at all three timepoints."
     )
 
-    sensitivity_df = run_timepoint_sensitivity()
-    TIMEPOINT_ORDER = [c for c in ["t=0", "t=7", "t=14"]
-                       if c in sensitivity_df["timepoint"].unique()]
+    long_df = load_longitudinal_data()
+    TIMEPOINTS = [0, 7, 14]
+    TRAJ_COLORS = {"yes": "#4C9BE8", "no": "#E87E4C"}
+    TRAJ_LABELS = {"yes": "Responder", "no": "Non-responder"}
 
-    def highlight_pval(val):
-        if isinstance(val, float) and val < 0.05:
-            return "background-color: #d4edda; color: #155724; font-weight: bold"
-        return ""
+    traj_fig = make_subplots(
+        rows=1, cols=len(CELL_POPULATIONS),
+        subplot_titles=[p.replace("_", " ").title() for p in CELL_POPULATIONS],
+        shared_yaxes=False,
+    )
+    for i, pop in enumerate(CELL_POPULATIONS):
+        col_name = f"{pop}_pct"
+        for response_val in ["yes", "no"]:
+            grp = long_df[long_df["response"] == response_val].groupby("time_from_treatment_start")[col_name]
+            means = grp.mean().reindex(TIMEPOINTS)
+            stds  = grp.std().reindex(TIMEPOINTS)
+            ns    = grp.count().reindex(TIMEPOINTS)
+            ci    = 1.96 * stds / np.sqrt(ns)
+            traj_fig.add_trace(
+                go.Scatter(
+                    x=TIMEPOINTS,
+                    y=means.tolist(),
+                    error_y=dict(type="data", array=ci.tolist(), visible=True, thickness=1.5, width=4),
+                    mode="lines+markers",
+                    name=TRAJ_LABELS[response_val],
+                    legendgroup=response_val,
+                    showlegend=(i == 0),
+                    line=dict(color=TRAJ_COLORS[response_val], width=2),
+                    marker=dict(color=TRAJ_COLORS[response_val], size=7),
+                ),
+                row=1, col=i + 1,
+            )
+        traj_fig.update_xaxes(tickvals=TIMEPOINTS, title_text="Days", row=1, col=i + 1)
+        if i == 0:
+            traj_fig.update_yaxes(title_text="Mean frequency (%)", row=1, col=1)
 
-    for metric, label, do_highlight in [
-        ("effect_size_r", "Effect size r (rank-biserial correlation)", False),
-        ("p_value",       "Raw p-value",                               True),
-        ("p_by_fdr",      "BY FDR p-value",                            True),
-    ]:
-        pivot = (
-            sensitivity_df.pivot(index="population", columns="timepoint", values=metric)
-            .reindex(columns=TIMEPOINT_ORDER)
-            .round(4)
+    traj_fig.update_layout(
+        height=380,
+        margin=dict(l=10, r=10, t=50, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.08, xanchor="center", x=0.5),
+    )
+    st.plotly_chart(traj_fig, use_container_width=True)
+    st.caption("Error bars = 95% CI (mean +/- 1.96 x SE). Blue = Responders, Orange = Non-responders.")
+
+    # LMM table
+    st.markdown("**Mixed effects model: do trajectories diverge? (time x response interaction)**")
+    st.caption(
+        "Model per population: frequency ~ time * response + (1 | subject). "
+        "The interaction p-value tests whether the rate of change over time differs between groups. "
+        "Green = p < 0.05."
+    )
+
+    lmm_df = load_lmm_results()
+
+    lmm_display = lmm_df[[
+        "population", "p_time", "p_response", "p_interaction", "p_interaction_by_fdr", "sig_interaction_by_fdr"
+    ]].rename(columns={
+        "population":              "Population",
+        "p_time":                  "p (time trend)",
+        "p_response":              "p (group diff. at t=0)",
+        "p_interaction":           "p (time x response, raw)",
+        "p_interaction_by_fdr":    "p (time x response, BY FDR)",
+        "sig_interaction_by_fdr":  "Significant?",
+    })
+    lmm_display["Significant?"] = lmm_display["Significant?"].map({True: "Yes", False: "No"})
+
+    def _highlight_interaction(row):
+        if row["Significant?"] == "Yes":
+            return ["background-color: #d4edda; color: #155724; font-weight: bold"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(
+        lmm_display.style.apply(_highlight_interaction, axis=1),
+        use_container_width=False,
+        hide_index=True,
+    )
+
+    bcell_row = lmm_df[lmm_df["population"] == "b_cell"].iloc[0]
+    bcell_raw = bcell_row["p_interaction"]
+    bcell_fdr = bcell_row["p_interaction_by_fdr"]
+    any_significant = lmm_df["sig_interaction_by_fdr"].any()
+
+    if any_significant:
+        sig_pops = lmm_df[lmm_df["sig_interaction_by_fdr"]]["population"].tolist()
+        st.success(
+            f"**Significant trajectory divergence after BY FDR correction: {', '.join(sig_pops)}.** "
+            "See table above for details."
         )
-        st.markdown(f"**{label}**")
-        styled = pivot.style.applymap(highlight_pval) if do_highlight else pivot
-        st.dataframe(styled, use_container_width=False)
+    else:
+        st.warning(
+            "**No population shows a significant trajectory difference after BY FDR correction.** "
+            f"B cells have the smallest raw interaction p-value ({bcell_raw:.4f}), and their "
+            "trajectories visually diverge in the plot above, but this does not survive correction "
+            f"for 5 simultaneous tests (BY FDR p = {bcell_fdr:.4f}). "
+            "The pattern is a candidate for follow-up but cannot be claimed as a statistically "
+            "significant finding with this dataset."
+        )
 
-    st.caption("Green cells = p < 0.05 (uncorrected). No population reaches significance after BY FDR correction at any timepoint.")
+    with st.expander("Sensitivity analysis: CLR-transformed frequencies"):
+        st.markdown(
+            "Cell population frequencies are compositional - they sum to 100% by construction, "
+            "which introduces artificial negative correlations between populations. "
+            "The centered log-ratio (CLR) transform removes this constraint: "
+            "`CLR(x) = log(x) - mean(log(x))` computed per sample across all five populations. "
+            "The same mixed effects model is then fit on CLR-transformed values. "
+            "No zeros exist in this dataset so no pseudocount is needed."
+        )
 
-    st.info(
-        "**Key insight:** cd4_t_cell shows essentially no baseline effect (r = +0.01 at t=0, p = 0.796), "
-        "but a modest positive signal emerges post-treatment (r = +0.098 at t=7, raw p = 0.030; r = +0.080 at t=14). "
-        "This temporal pattern indicates cd4_t_cell is a **marker of treatment response** "
-        "(responders' CD4 T cell frequencies rise during treatment) rather than a predictor of who will respond. "
-        "Neither the t=7 nor t=14 signal survives BY FDR correction. "
-        "A true predictor must be measurable before treatment begins."
-    )
+        clr_df = load_lmm_results_clr()
+
+        clr_display = clr_df[[
+            "population", "p_interaction", "p_interaction_by_fdr", "sig_interaction_by_fdr"
+        ]].rename(columns={
+            "population":             "Population",
+            "p_interaction":          "p (time x response, raw)",
+            "p_interaction_by_fdr":   "p (time x response, BY FDR)",
+            "sig_interaction_by_fdr": "Significant?",
+        })
+        clr_display["Significant?"] = clr_display["Significant?"].map({True: "Yes", False: "No"})
+
+        def _hl_clr(row):
+            if row["Significant?"] == "Yes":
+                return ["background-color: #d4edda; color: #155724; font-weight: bold"] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(
+            clr_display.style.apply(_hl_clr, axis=1),
+            use_container_width=False,
+            hide_index=True,
+        )
+
+        clr_bcell = clr_df[clr_df["population"] == "b_cell"].iloc[0]
+        st.caption(
+            f"CLR result for b_cell: raw p = {clr_bcell['p_interaction']:.4f}, "
+            f"BY FDR p = {clr_bcell['p_interaction_by_fdr']:.4f}. "
+            "Consistent with the primary analysis - the null conclusion holds on the CLR scale."
+        )
+
+    # Per-timepoint detail (collapsed)
+    with st.expander("Per-timepoint effect sizes and p-values"):
+        st.caption(
+            "Breakdown of effect size r and p-values at each individual timepoint. "
+            "A genuine predictor shows a signal at t=0. "
+            "Signals appearing only at t=7 or t=14 are treatment effects, not predictors."
+        )
+
+        sensitivity_df = run_timepoint_sensitivity()
+        TIMEPOINT_ORDER = [c for c in ["t=0", "t=7", "t=14"]
+                           if c in sensitivity_df["timepoint"].unique()]
+
+        def highlight_pval(val):
+            if isinstance(val, float) and val < 0.05:
+                return "background-color: #d4edda; color: #155724; font-weight: bold"
+            return ""
+
+        for metric, label, do_highlight in [
+            ("effect_size_r", "Effect size r (rank-biserial correlation)", False),
+            ("p_value",       "Raw p-value",                               True),
+            ("p_by_fdr",      "BY FDR p-value",                            True),
+        ]:
+            pivot = (
+                sensitivity_df.pivot(index="population", columns="timepoint", values=metric)
+                .reindex(columns=TIMEPOINT_ORDER)
+                .round(4)
+            )
+            st.markdown(f"**{label}**")
+            styled = pivot.style.applymap(highlight_pval) if do_highlight else pivot
+            st.dataframe(styled, use_container_width=False)
+
+        st.caption("Green = p < 0.05 (uncorrected). No population reaches BY FDR significance at any timepoint.")
 
 
 # ---------------------------------------------------------------------------

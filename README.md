@@ -128,23 +128,30 @@ Initializes the SQLite schema and loads `cell-count.csv` in a single pass. Uses 
 Contains all analytical logic, cleanly separated from the UI layer:
 
 - **`get_frequency_table()`**: Queries all samples, computes per-population percentages, returns a long-format DataFrame (Part 2).
-- **`get_timepoint_data(t)`**: Filters to melanoma + miraclib + PBMC samples at a single timepoint, computes per-sample cell frequencies, returns one row per subject. Used as the primary data source for Part 3 (called with `t=0`).
-- **`run_statistical_tests(df)`**: Runs Mann-Whitney U (two-sided, non-parametric) per population comparing responders vs non-responders on any subject-level DataFrame. Returns raw p-values plus Bonferroni, BH FDR, and BY FDR corrections, and rank-biserial correlation effect sizes computed on post-dropna sample sizes. BY FDR is the primary correction; cell percentages are compositionally negatively correlated, violating BH's positive dependence assumption (Part 3).
-- **`run_timepoint_sensitivity()`**: Repeats the Mann-Whitney U + BY FDR tests at each individual timepoint (t=0, t=7, t=14). Used to assess whether any signal is pre-existing at baseline or emerges only post-treatment (Part 3).
+- **`get_timepoint_data(t)`**: Filters to melanoma + miraclib + PBMC samples at a single timepoint, computes per-sample cell frequencies, returns one row per subject (Part 3).
+- **`run_statistical_tests(df)`**: Runs Mann-Whitney U (two-sided, non-parametric) per population comparing responders vs non-responders. Returns raw p-values plus Bonferroni, BH FDR, and BY FDR corrections, and rank-biserial correlation effect sizes. BY FDR is the reported correction; cell percentages are compositionally negatively correlated, violating BH's positive-dependence assumption (Part 3).
+- **`run_timepoint_sensitivity()`**: Repeats Mann-Whitney U + BY FDR at each timepoint (t=0, t=7, t=14) to show how effect sizes evolve over the course of treatment (Part 3).
+- **`get_longitudinal_data()`**: Returns all three timepoints combined for the filtered cohort, one row per (subject, timepoint). Used as input for trajectory analysis (Part 3).
+- **`run_mixed_effects_models(long_df)`**: Fits a linear mixed effects model per population (`frequency ~ time * response + (1 | subject)`). The time x response interaction term tests whether trajectories diverge between groups while accounting for repeated measures within subjects (Part 3).
+- **`run_mixed_effects_models_clr(long_df)`**: Sensitivity analysis - same LMM on CLR-transformed frequencies (`CLR(x) = log(x) - mean(log(x))` per sample). Removes the constant-sum constraint of compositional data, giving an unconstrained outcome that better satisfies linear model assumptions (Part 3).
 - **`get_boxplot_figure()`**: Returns a matplotlib figure for static use (Part 3).
 - **`get_baseline_samples()`**: Queries the DB for melanoma PBMC baseline miraclib samples (Part 4).
 - **`get_samples_per_project()`, `get_responder_counts()`, `get_sex_counts()`**: Aggregation helpers that operate on the baseline DataFrame (Part 4).
-- **`get_avg_bcell_melanoma_males()`**: Returns the average B cell count for melanoma male responders at baseline.
+- **`get_avg_bcell_melanoma_males()`**: Returns the average B cell count for melanoma male responders at baseline (Part 4).
 
 ### `dashboard.py`
 
 A three-tab Streamlit app that calls functions from `analysis.py` and renders results with Plotly:
 
 - **Tab 1 (Part 2):** Filterable frequency table with per-population summary statistics.
-- **Tab 2 (Part 3):** Baseline (t=0) significance table + interactive boxplots annotated with p-value, BY FDR p-value, and effect size r. Below that, a temporal context section showing effect sizes and p-values across t=0, t=7, and t=14 to distinguish predictive signals from treatment-induced effects.
+- **Tab 2 (Part 3):** Two-section layout telling a coherent story about immune cell frequencies and treatment response.
+  - *Before Treatment:* Significance table (t=0) + interactive boxplots with a timepoint selector (t=0 labeled as prediction-relevant). Answers whether any population predicts response before treatment starts.
+  - *During Treatment:* Mean trajectory line plots (+/- 95% CI) across t=0, t=7, t=14 for all five populations, plus a mixed effects model table testing whether trajectories diverge between groups. Answers whether any population changes differently over the course of treatment.
+  - Per-timepoint effect size and p-value tables are available in a collapsed expander.
+  - A CLR sensitivity analysis expander shows the same LMM on centered log-ratio transformed frequencies, confirming the null conclusion holds on the compositionally-corrected scale.
 - **Tab 3 (Part 4):** Baseline sample counts broken down by project, response, and sex, plus average B cell count for melanoma male responders displayed as a metric.
 
-Stable reference data (frequency table, baseline samples) is wrapped in `@st.cache_data`. Part 3 statistical results are computed fresh on each render to ensure formula and data changes are always reflected immediately.
+Stable reference data (frequency table, baseline samples, longitudinal data) is wrapped in `@st.cache_data`. Statistical results are computed fresh on each render.
 
 **Why Streamlit?** It requires no frontend code, runs well in GitHub Codespaces (single port, no build step), and produces a shareable deployment URL via Streamlit Community Cloud with zero configuration.
 
@@ -152,39 +159,39 @@ Stable reference data (frequency table, baseline samples) is wrapped in `@st.cac
 
 ## Key Findings
 
-**Part 3: Statistical Analysis (melanoma, miraclib, PBMC):**
+**Part 3: Statistical Analysis (melanoma, miraclib, PBMC, n = 656)**
 
-**Goal:** identify immune cell populations that predict treatment response *before* treatment starts.
+### Before treatment: can baseline frequencies predict who will respond?
 
-**Unit of analysis:** one observation per subject at t=0 (single pre-treatment PBMC sample). Using only the baseline timepoint ensures the analysis is causally valid: only measurements taken before treatment can inform response prediction. All 656 subjects have a t=0 sample (331 responders, 325 non-responders).
+**Short answer: no.** None of the five populations tested distinguishes responders from non-responders before treatment starts.
 
-**Test:** Mann-Whitney U (two-sided, non-parametric). Multiple testing correction applied across all 5 simultaneous comparisons. **Effect size:** rank-biserial correlation r, computed on post-dropna sample sizes (r > 0 = responders rank higher; r < 0 = non-responders rank higher). |r| < 0.1 negligible, 0.1–0.3 small.
-
-**Correction note:** Cell population percentages are compositional (sum to 100%), inducing negative correlations between populations. BH FDR assumes independence or positive correlation and is therefore anti-conservative here. Benjamini-Yekutieli (BY) FDR is valid under any correlation structure and is used as the primary correction. Bonferroni (FWER) is included as a secondary check.
-
-**Baseline (t=0) results:**
-
-| Population | p (raw) | p (Bonferroni) | p (BY FDR) | Sig. (BY FDR) | Effect size r |
-|---|---|---|---|---|---|
-| b_cell | 0.5485 | 1.0000 | 1.0000 | No | +0.027 (negligible) |
-| cd8_t_cell | 0.5140 | 1.0000 | 1.0000 | No | −0.030 (negligible) |
-| cd4_t_cell | 0.7964 | 1.0000 | 1.0000 | No | +0.012 (negligible) |
-| nk_cell | 0.8853 | 1.0000 | 1.0000 | No | −0.007 (negligible) |
-| monocyte | 0.2114 | 1.0000 | 1.0000 | No | −0.056 (negligible) |
-
-**Primary conclusion:** At baseline, no cell population distinguishes responders from non-responders. All raw p-values are well above 0.05 and all effect sizes are negligible (|r| < 0.06). There is no evidence of a pre-existing immune cell frequency signature that predicts miraclib response in this melanoma cohort.
-
-**Temporal context: effect size r across timepoints:**
-
-| Population | t=0 (baseline) | t=7 | t=14 |
+| Population | p (raw) | p (BY FDR) | Effect size r |
 |---|---|---|---|
-| b_cell | +0.027 | −0.066 | −0.110 |
-| cd4_t_cell | +0.012 | +0.098 | +0.080 |
-| cd8_t_cell | −0.030 | −0.021 | +0.015 |
-| monocyte | −0.056 | −0.032 | −0.021 |
-| nk_cell | −0.007 | −0.067 | −0.045 |
+| b_cell | 0.5485 | 1.0000 | +0.027 (negligible) |
+| cd8_t_cell | 0.5140 | 1.0000 | -0.030 (negligible) |
+| cd4_t_cell | 0.7964 | 1.0000 | +0.012 (negligible) |
+| nk_cell | 0.8853 | 1.0000 | -0.007 (negligible) |
+| monocyte | 0.2114 | 1.0000 | -0.056 (negligible) |
 
-**Key insight:** cd4_t_cell shows a near-zero effect at baseline (r = +0.012, p = 0.796) but a modest positive effect at t=7 (r = +0.098, raw p = 0.030) and t=14 (r = +0.080). This temporal pattern (signal absent pre-treatment, emerging post-treatment) indicates cd4_t_cell is a **marker of treatment response** (responders' CD4 T cell frequencies rise during treatment) rather than a predictor of who will respond. Neither the t=7 nor t=14 signal survives BY FDR correction. No population reaches significance at any timepoint after correction.
+All raw p-values exceed 0.20. All effect sizes are negligible (|r| < 0.06). There is no pre-treatment immune cell frequency signature that predicts miraclib response in this cohort.
+
+*Correction note:* BY FDR is used rather than BH FDR because cell percentages sum to 100%, inducing negative correlations between populations that violate BH's positive-dependence assumption.
+
+### During treatment: do any populations change differently over time?
+
+A linear mixed effects model (`frequency ~ time * response + (1 | subject)`) was fit per population to test whether trajectories diverge between groups across t=0, t=7, and t=14.
+
+BY FDR correction applied across the 5 simultaneous interaction tests, consistent with the Mann-Whitney analysis.
+
+| Population | p (time x response, raw) | p (time x response, BY FDR) | Significant? |
+|---|---|---|---|
+| b_cell | 0.0156 | 0.1781 | No |
+| cd8_t_cell | 0.5837 | 1.0000 | No |
+| cd4_t_cell | 0.2883 | 1.0000 | No |
+| nk_cell | 0.4066 | 1.0000 | No |
+| monocyte | 0.4648 | 1.0000 | No |
+
+**No population shows a significant trajectory difference after BY FDR correction.** B cells have the smallest raw interaction p-value (0.016) and their trajectories visually diverge in the line plot (responders decline, non-responders remain stable), but this does not survive correction for 5 simultaneous tests (BY FDR p = 0.178). The pattern is a candidate for follow-up but cannot be claimed as a statistically significant finding with this dataset.
 
 **Part 4: Baseline subset (melanoma, PBMC, time=0, miraclib):**
 
