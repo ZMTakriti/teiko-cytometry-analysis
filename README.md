@@ -1,4 +1,4 @@
-# Teiko Take-Home: Immune Cell Population Analysis
+# Immune Cell Population Analysis
 
 An interactive clinical trial data analysis tool built with Python, SQLite, and Streamlit.
 
