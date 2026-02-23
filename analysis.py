@@ -141,6 +141,7 @@ def run_statistical_tests(stats_df: pd.DataFrame) -> pd.DataFrame:
     non_responders = stats_df[stats_df["response"] == "no"]
 
     rows = []
+    raw_pvals = []
     for pop in CELL_POPULATIONS:
         col = f"{pop}_pct"
         r_vals = responders[col].dropna()
@@ -150,6 +151,7 @@ def run_statistical_tests(stats_df: pd.DataFrame) -> pd.DataFrame:
         U, p = mannwhitneyu(r_vals, nr_vals, alternative="two-sided")
         r_rb = (2 * U) / (n1_pop * n2_pop) - 1
 
+        raw_pvals.append(p)
         rows.append(
             {
                 "population": pop,
@@ -161,12 +163,12 @@ def run_statistical_tests(stats_df: pd.DataFrame) -> pd.DataFrame:
         )
 
     result_df = pd.DataFrame(rows)
-    pvals = result_df["p_value"].values
+    pvals = raw_pvals
 
     # Bonferroni (FWER, no assumption on correlation structure)
     _, pvals_bonf, _, _ = multipletests(pvals, alpha=0.05, method="bonferroni")
     result_df["p_bonferroni"] = pvals_bonf.round(6)
-    result_df["sig_uncorrected"] = pvals < 0.05
+    result_df["sig_uncorrected"] = [p < 0.05 for p in pvals]
     result_df["sig_bonferroni"] = pvals_bonf < 0.05
 
     # Benjamini-Hochberg FDR (assumes independence or positive correlation)
