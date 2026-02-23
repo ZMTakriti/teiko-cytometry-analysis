@@ -1,4 +1,4 @@
-# Immune Cell Population Analysis
+# Teiko technical: Immune Cell Population Analysis
 
 An interactive clinical trial data analysis tool built with Python, SQLite, and Streamlit.
 
