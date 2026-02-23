@@ -131,14 +131,17 @@ with tab1:
 with tab2:
     st.header("Responder Analysis: Immune Cell Frequencies and Treatment Response")
     st.markdown(
-        "**Cohort:** melanoma patients, miraclib treatment, PBMC samples "
-        "(n = 656: 331 responders, 325 non-responders). "
-        "**Test:** Mann-Whitney U, two-sided. "
-        "**Correction:** Benjamini-Yekutieli (BY) FDR - valid under any correlation structure, "
-        "including the negative correlations that arise because cell percentages sum to 100%. "
-        "**Effect size:** rank-biserial r (positive = responders rank higher; "
-        "|r| < 0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >0.5 large)."
+        "Melanoma patients treated with miraclib, PBMC samples only "
+        "(n = 656: 331 responders, 325 non-responders)."
     )
+    with st.expander("Statistical methods"):
+        st.markdown(
+            """
+- **Test:** Mann-Whitney U, two-sided, non-parametric
+- **Correction:** Benjamini-Yekutieli (BY) FDR across 5 populations - valid under any correlation structure, including the negative correlations that arise because cell percentages sum to 100%
+- **Effect size:** rank-biserial r (positive = responders rank higher; |r| < 0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >0.5 large)
+            """
+        )
 
     COLORS = {"yes": "#4C9BE8", "no": "#E87E4C"}
     LABELS = {"yes": "Responder", "no": "Non-responder"}
