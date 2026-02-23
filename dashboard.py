@@ -131,15 +131,29 @@ with tab1:
 with tab2:
     st.header("Responder Analysis: Immune Cell Frequencies and Treatment Response")
     st.markdown(
-        "Melanoma patients treated with miraclib, PBMC samples only "
-        "(n = 656: 331 responders, 325 non-responders)."
+        "This analysis examines PBMC samples from melanoma patients treated with miraclib "
+        "(n = 656: 331 whose tumors responded to treatment, 325 whose did not), asking two questions:"
+    )
+    st.markdown(
+        """
+- Can immune cell frequencies measured **before treatment begins** identify who will respond?
+- Do any populations **change differently over the course of treatment** between the two groups?
+
+Either finding would make those populations candidates as predictive or response-tracking biomarkers.
+        """
     )
     with st.expander("Statistical methods"):
         st.markdown(
             """
+**Baseline comparison (t=0)**
 - **Test:** Mann-Whitney U, two-sided, non-parametric
 - **Correction:** Benjamini-Yekutieli (BY) FDR across 5 populations - valid under any correlation structure, including the negative correlations that arise because cell percentages sum to 100%
 - **Effect size:** rank-biserial r (positive = responders rank higher; |r| < 0.1 negligible, 0.1-0.3 small, 0.3-0.5 medium, >0.5 large)
+
+**Trajectory analysis (t=0, 7, 14)**
+- **Test:** Linear mixed effects model per population - `frequency ~ time * response + (1 | subject)` - testing whether trajectories diverge between groups while accounting for repeated measures
+- **Correction:** BY FDR across the 5 simultaneous interaction tests
+- **Sensitivity:** Same model on CLR-transformed frequencies to verify results hold after removing the compositional constraint
             """
         )
 
